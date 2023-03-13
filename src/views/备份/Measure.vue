@@ -1,0 +1,414 @@
+<template>
+    <div class="measure">
+       	<el-button @click="clearFilter" type="primary" style="margin-bottom:1vh">清除所有筛选</el-button>
+       	<span style="marginLeft:1.2vw;color:#fff">刷新间隔：</span>
+		<el-select
+			v-model="refreshValue"
+			placeholder="刷新间隔"
+		>
+			<el-option
+				v-for="refresh in refreshOptions"
+				:key="refresh.value"
+				:label="refresh.label"
+				:value="refresh.value"
+			>
+			</el-option>
+		</el-select>
+        <el-table
+           	ref="filterTable"
+            :data="deviceList.slice((currentPage-1)*pageSize,currentPage*pageSize)"
+            border
+            style="width: 100%"
+        >
+            <el-table-column type="index" label="序号" align="center" width="100"> </el-table-column>
+            <el-table-column
+            	prop="position_id"
+            	label="位号"
+				align="center"
+            	:filters="positionIdList"
+            	:filter-method="filterHandler"
+            ></el-table-column>
+            <el-table-column
+            	prop="gas_name"
+            	label="测量组分"
+            	align="center"
+            	:filters="gasList"
+            	:filter-method="filterHandler"
+            	width="90"
+            >
+            	<template v-slot="scope">
+            		{{scope.row.gas_name.toUpperCase()}}
+            	</template>
+            </el-table-column>
+            <el-table-column prop="detect_gas" label="测量值" align="center" width="80">
+                <template v-slot="scope">
+                    {{ getDet(scope.row) }}
+                </template>
+            </el-table-column>
+            <el-table-column prop="unit" label="单位" align="center" width="80"></el-table-column>
+            <el-table-column
+            	prop="location"
+            	label="安装位置"
+            	align="center"
+            	:filters="locationList"
+            	:filter-method="filterHandler"
+            	width="180"
+            >
+            </el-table-column>
+            <el-table-column
+                prop="area"
+                label="安装区域"
+                align="center"
+                :filters="areaList"
+                :filter-method="filterHandler"
+                width="180"
+            >
+            </el-table-column>
+            <el-table-column prop="" label="一级报警状态" align="center" width="110">
+                <template v-slot="scope">
+                    <div v-if="scope.row.is_online" :class="`safe ${isFirstAlarm(scope.row) ? 'alarm1' : ''}`"></div>
+                    <div v-else style="textAlign:center">---</div>
+                </template>
+            </el-table-column>
+            <el-table-column prop="" label="二级报警状态" align="center" width="110">
+                <template v-slot="scope">
+                    <div v-if="scope.row.is_online" :class="`safe ${isSecondAlarm(scope.row) ? 'alarm2' : ''}`"></div>
+                    <div v-else style="textAlign:center">---</div>
+                </template>
+            </el-table-column>
+            <el-table-column
+            	prop="is_online"
+            	label="网络状态"
+            	align="center"
+            	:filters="onlineList"
+            	:filter-method="filterHandler"
+            	width="90"
+			>
+                <template v-slot="scope">
+                    {{ scope.row.is_online ? "在线" : "离线" }}
+                </template>
+            </el-table-column>
+            <el-table-column prop="battery" label="电池电量" align="center" width="80">
+				<template v-slot="{row,$index}">
+					<div :class="`${row.battery<=20 ? 'danger' : ''}`">{{row.battery}}</div>
+				</template>
+			</el-table-column>
+            <el-table-column  label="查询趋势" align="center" width="90">
+                <template v-slot="scope">
+                    <el-button
+                        @click="handleClick(scope.row)"
+                        type="text"
+                        size="small"
+					>点击</el-button>
+                </template>
+            </el-table-column>
+        </el-table>
+		<Footer
+			:handleSizeChange="handleSizeChange"
+			:handleCurrentChange="handleCurrentChange"
+			:currentPage="currentPage"
+			:pageSize="pageSize"
+			:total="deviceList.length"
+		></Footer>
+    </div>
+</template>
+<script>
+import Footer from "./components/Footer";
+import {mapState} from "vuex";
+import {updateAlarmSensor} from "@/plugs/sensor";
+export default {
+	name:"Measure",
+	components:{
+		Footer
+	},
+    data() {
+        return {
+			areaList: [],
+			currentPage:1,
+			gasList:[
+				{
+					text:"CO",
+					value:"CO"
+				},
+				{
+					text:"H2",
+					value:"H2"
+				},
+				{
+					text:"H2S",
+					value:"H2S"
+				},
+				{
+					text:"NH3",
+					value:"NH3"
+				},
+				{
+					text:"SO2",
+					value:"SO2"
+				},
+			],
+			locationList:[],
+			numList: [],
+			onlineList:[
+				{
+					text:"在线",
+					value:1
+				},
+				{
+					text:"离线",
+					value:0
+				}
+			],
+			pageSize:10,
+			positionIdList:[],
+			refreshOptions:[
+				{
+					label:"5",
+					value:5000,
+				},
+				{
+					label:"10",
+					value:10000,
+				},
+				{
+					label:"20",
+					value:20000,
+				},
+				{
+					label:"30",
+					value:30000,
+				},
+			],
+			refreshValue:20000,
+			timerId:null,
+        };
+    },
+	computed: {
+		...mapState("Device",["deviceList"]),
+		getDet() {
+		    return row => {
+				if(row.is_online){
+					if(row.unit==="mg/m3")
+						return this.ppmToMgm3(row.data,row.atmosphere,row.temperature,row.molecular_weight);
+					else if(row.unit==="%")
+						return this.ppmToV(row.data);
+					else return row.data;
+				}else{
+					return "NA";
+				}
+		    };
+		},
+        getGas() {
+            return (str) => {
+                str = str.replace("[", "");
+                str = str.replace("]", "");
+                let _str = str.split(",");
+                let list = "";
+                for (let i = 0; i < _str.length; i++) {
+                    list += _str[i] + " ";
+                }
+                return list;
+            };
+        },
+		getStyle(row){
+			console.log(row);
+			return "redPulse";
+		}
+    },
+    methods: {
+		clear(){
+			clearInterval(this.timerId);
+			this.timerId=null;
+		},
+		//清除所有筛选
+		clearFilter(){
+			this.$refs.filterTable.clearFilter();
+		},
+		//初始化筛选选项
+		clearFilterOptions(){
+			this.areaList=[];
+			this.locationList=[];
+			this.positionIdList=[];
+		},
+		//筛选通用写法
+		filterHandler(value,row,column){
+			const property=column['property'];
+			return row[property]===value;
+		},
+		//获取所有筛选信息
+		getAllFilterInfo(){
+			this.clearFilterOptions();
+			let areaSet=new Set();
+			let positionIdSet=new Set();
+			let locationSet=new Set();
+			for(let item of this.deviceList){
+				areaSet.add(item.area);
+				positionIdSet.add(item.position_id);
+				locationSet.add(item.location);
+			}
+			//去重
+			let tmpAreaList=[...areaSet];
+			let tmpPositionIdList=[...positionIdSet];
+			let tmpLocationList=[...locationSet];
+			//更新筛选列表
+			this.updateFilterInfo(this.areaList,tmpAreaList);
+			this.updateFilterInfo(this.locationList,tmpLocationList);
+			this.updateFilterInfo(this.positionIdList,tmpPositionIdList);
+		},
+        handleClick(e) {
+            this.$bus.$emit("Chart");
+            this.$router.push(
+                "/main/" + this.$route.params.id + "/chart/" + e.position_id
+            );
+        },
+		handleCurrentChange(value){
+			this.currentPage=value;
+		},
+		handleSizeChange(value){
+			this.currentPage=1;
+			this.pageSize=value;
+		},
+		init(){
+			this.$store.dispatch("Device/getDeviceList");
+		},
+		//判断是否一级警报
+		isFirstAlarm(row){
+			return this.getDet(row)>=row.first_alarm*0.01*row.scope;
+		},
+		//判断是否二级警报
+		isSecondAlarm(row){
+			return this.getDet(row)>=row.second_alarm*0.01*row.scope;
+		},
+		//ppm转mgm3
+		ppmToMgm3(ppm,P,T,Mw){
+			return (ppm*101.325/P*273.15/T*Mw/22.4).toFixed(2);
+		},
+		//ppm转%
+		ppmToV(ppm){
+			return ppm/10000;
+		},
+		refresh(){
+			this.clear();
+			this.init();
+			this.timerId=setInterval(()=>{
+				this.init();
+			},this.refreshValue);
+		},
+		//将list转换成筛选格式
+		updateFilterInfo(target,list){
+			for(let item of list){
+				target.push({
+					text:item,
+					value:item
+				});
+			}
+		},
+    },
+	watch:{
+		deviceList:{
+			deep:true,
+			handler(newValue){
+				this.deviceList.forEach(item=>{
+					const id=item.id;
+					const position_id=item.position_id;
+					if(this.isFirstAlarm(item))
+						updateAlarmSensor(id,position_id,1);
+				});
+				this.getAllFilterInfo();
+			}
+		},
+		refreshValue:{
+			handler(newValue){
+				this.refresh();
+			}
+		}
+	},
+    mounted() {
+		this.refresh();
+    },
+	beforeDestroy(){
+		clearInterval(this.timerId);
+		this.timerId=null;
+	},
+};
+</script>
+<style lang="less" scoped>
+/*最外层透明*/
+/deep/ .el-table, /deep/ .el-table__expanded-cell{
+  background-color: transparent;
+}
+/* 表格内背景颜色 */
+/deep/ .el-table th,
+/deep/ .el-table tr,
+/deep/ .el-table td {
+  background-color: transparent;
+  color: #fff;
+}
+/deep/.el-table tbody tr:hover>td {
+    background-color: rgba(156, 158, 158, 0.575) !important;
+}
+/deep/.el-table td, .el-table th.is-leaf,.el-table--border, .el-table--group{
+  border-color: #00E1E5; 
+}
+/deep/.el-table--border::after, .el-table--group::after, .el-table::before{
+  background-color: #00E1E5;
+}
+// 头部的下边框
+/deep/.el-table--border th,
+.el-table--border th.gutter:last-of-type {
+  border-bottom: 1px solid #00E1E5 !important;
+  border-right: 1px solid #00E1E5 !important;
+}
+</style>
+<style lang="less" scoped>
+.measure {
+    width: 100%;
+    height: 100%;
+	overflow: scroll;
+	@keyframes redPulse{
+		from{
+			background-color: red;
+		}
+		25%{
+			background-color: #dd0000;
+			opacity:0.75;
+		}
+		50%{
+			background-color: #bc330d;
+			opacity: 0.5;
+		}
+		75%{
+			background-color: #dd0000;
+			opacity: 0.75;
+		}
+		to{
+			background-color: red;
+		}
+	}
+    .safe {
+        width: 15px;
+        height: 15px;
+        border-radius: 50%;
+        background-color: #25FF1D;
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%,-50%);
+    }
+	.alarm1{
+		background-color: #FFFF00;
+	}
+    .alarm2{
+        background-color: #FF1D1D;
+    }
+	.danger{
+		animation:redPulse 500ms infinite;
+	}
+	&::-webkit-scrollbar {
+		display:none;
+	}
+	.cell .el-table__column-filter-trigger .el-icon-arrow-down{
+		background:#fff;
+	}
+}
+</style>
